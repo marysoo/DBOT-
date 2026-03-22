@@ -1,0 +1,5 @@
+{
+  "name": "Deriv Pro Bot v2",
+  "description": "Professional automated trading bot for Deriv.com, optimized for micro-accounts ($5+) with advanced digit pattern recognition and smart Martingale risk management.",
+  "requestFramePermissions": []
+}
