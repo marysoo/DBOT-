@@ -47,6 +47,13 @@ export default function App() {
   const [martingaleMultiplier, setMartingaleMultiplier] = useState(2.1); // Optimized for ~95% payout
   const [maxMartingaleSteps, setMaxMartingaleSteps] = useState(3); // Safety for $5 capital
   
+  // --- Over-trading Protection ---
+  const [maxTradesPerSession, setMaxTradesPerSession] = useState(20);
+  const [cooldownMinutes, setCooldownMinutes] = useState(60);
+  const [cooldownEndTime, setCooldownEndTime] = useState<number | null>(null);
+  const [tradesThisSession, setTradesThisSession] = useState(0);
+  const [cooldownRemaining, setCooldownRemaining] = useState<string | null>(null);
+  
   const [stats, setStats] = useState<BotStats>({
     totalTrades: 0,
     wins: 0,
@@ -74,6 +81,29 @@ export default function App() {
   useEffect(() => { lastDigitsRef.current = lastDigits; }, [lastDigits]);
   useEffect(() => { isBotRunningRef.current = isBotRunning; }, [isBotRunning]);
   useEffect(() => { currentStepRef.current = currentStep; }, [currentStep]);
+
+  // Cooldown Timer Effect
+  useEffect(() => {
+    if (!cooldownEndTime) return;
+
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const diff = cooldownEndTime - now;
+
+      if (diff <= 0) {
+        setCooldownEndTime(null);
+        setCooldownRemaining(null);
+        clearInterval(timer);
+        addLog('Cooldown period ended. You can trade again.', 'success');
+      } else {
+        const minutes = Math.floor(diff / 60000);
+        const seconds = Math.floor((diff % 60000) / 1000);
+        setCooldownRemaining(`${minutes}m ${seconds}s`);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [cooldownEndTime]);
 
   // --- Helpers ---
   const addLog = (message: string, type: BotLog['type'] = 'info') => {
@@ -126,6 +156,12 @@ export default function App() {
   const startBot = () => {
     if (!isAuthorized || !derivRef.current) return;
     
+    // Over-trading Check
+    if (cooldownEndTime && Date.now() < cooldownEndTime) {
+      addLog(`Over-trading protection active. Please wait ${cooldownRemaining} before trading again.`, 'error');
+      return;
+    }
+
     // Capital Check
     if (stats.balance < stake) {
       addLog('Insufficient balance to start', 'error');
@@ -134,6 +170,7 @@ export default function App() {
 
     setIsBotRunning(true);
     setCurrentStep(0);
+    setTradesThisSession(0);
     const initialStake = Math.round(stake * 100) / 100;
     setStats(prev => ({ ...prev, currentStake: initialStake }));
     addLog(`Bot started. Capital: $${stats.balance.toFixed(2)} | Target: +$${takeProfit}`, 'info');
@@ -153,6 +190,23 @@ export default function App() {
     setIsAuthorized(false);
     setIsBotRunning(false);
     addLog('Disconnected', 'info');
+  };
+  
+  const resetStats = () => {
+    if (isBotRunning) return;
+    
+    setStats(prev => ({
+      totalTrades: 0,
+      wins: 0,
+      losses: 0,
+      totalProfit: 0,
+      currentStake: stake,
+      balance: prev.balance,
+    }));
+    setLogs([]);
+    setLastDigits([]);
+    setCurrentStep(0);
+    addLog('Session stats reset', 'info');
   };
 
   const handleTick = async (tick: any) => {
@@ -218,6 +272,7 @@ export default function App() {
           balance: prev.balance + result.profit,
           currentStake: stake,
         }));
+        setTradesThisSession(prev => prev + 1);
       } else {
         addLog(`Loss. -$${Math.abs(result.profit).toFixed(2)}`, 'error');
         const nextStep = currentStepRef.current + 1;
@@ -233,6 +288,7 @@ export default function App() {
             balance: prev.balance + result.profit,
             currentStake: stake,
           }));
+          setTradesThisSession(prev => prev + 1);
         } else {
           setCurrentStep(nextStep);
           setStats(prev => {
@@ -246,7 +302,16 @@ export default function App() {
               currentStake: nextStake,
             };
           });
+          setTradesThisSession(prev => prev + 1);
         }
+      }
+
+      // Over-trading Check
+      if (tradesThisSession + 1 >= maxTradesPerSession) {
+        const endTime = Date.now() + cooldownMinutes * 60000;
+        setCooldownEndTime(endTime);
+        stopBot();
+        addLog(`OVER-TRADING DETECTED! Session limit of ${maxTradesPerSession} trades reached. Bot stopped for ${cooldownMinutes} minutes.`, 'error');
       }
 
       // TP/SL Logic
@@ -303,6 +368,25 @@ export default function App() {
         {/* Left Column: Controls & Settings */}
         <div className="lg:col-span-4 space-y-6">
           
+          {cooldownEndTime && (
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="bg-[#f85149]/10 border border-[#f85149]/30 p-5 rounded-2xl flex items-start gap-4 shadow-xl shadow-[#f85149]/5"
+            >
+              <div className="w-10 h-10 bg-[#f85149]/20 rounded-xl flex items-center justify-center flex-shrink-0">
+                <AlertCircle className="text-[#f85149] w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-[#f85149] uppercase tracking-wider">Over-trading Protection</h3>
+                <p className="text-xs text-[#8b949e] mt-1 leading-relaxed">
+                  Session limit of <span className="text-white font-bold">{maxTradesPerSession} trades</span> reached. 
+                  Trading is locked for <span className="text-white font-mono font-bold">{cooldownRemaining}</span> to prevent emotional trading.
+                </p>
+              </div>
+            </motion.div>
+          )}
+
           {/* Auth Card */}
           <section className="bg-[#161b22] border border-[#30363d] rounded-2xl overflow-hidden shadow-sm">
             <div className="px-5 py-4 border-b border-[#30363d] flex items-center gap-2 bg-[#1c2128]">
@@ -428,16 +512,26 @@ export default function App() {
                 />
               </div>
 
-              <div className="pt-2">
+              <div className="pt-2 flex gap-3">
                 {!isBotRunning ? (
-                  <button 
-                    onClick={startBot}
-                    disabled={!isAuthorized}
-                    className="w-full bg-[#3fb950] hover:bg-[#46c95a] disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#3fb950]/10"
-                  >
-                    <Play className="w-5 h-5 fill-current" />
-                    START BOT
-                  </button>
+                  <>
+                    <button 
+                      onClick={startBot}
+                      disabled={!isAuthorized}
+                      className="flex-1 bg-[#3fb950] hover:bg-[#46c95a] disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#3fb950]/10"
+                    >
+                      <Play className="w-5 h-5 fill-current" />
+                      START BOT
+                    </button>
+                    <button 
+                      onClick={resetStats}
+                      disabled={!isAuthorized || isBotRunning}
+                      className="p-3 bg-[#30363d] hover:bg-[#3d444d] disabled:opacity-50 text-[#8b949e] hover:text-white rounded-xl transition-all flex items-center justify-center shadow-sm"
+                      title="Reset Session Stats"
+                    >
+                      <History className="w-5 h-5" />
+                    </button>
+                  </>
                 ) : (
                   <button 
                     onClick={stopBot}
@@ -448,6 +542,41 @@ export default function App() {
                   </button>
                 )}
               </div>
+            </div>
+          </section>
+
+          {/* Risk Management Card */}
+          <section className="bg-[#161b22] border border-[#30363d] rounded-2xl overflow-hidden shadow-sm">
+            <div className="px-5 py-4 border-b border-[#30363d] flex items-center gap-2 bg-[#1c2128]">
+              <ShieldCheck className="w-4 h-4 text-[#d29922]" />
+              <h2 className="font-semibold text-sm uppercase tracking-wide">Risk Management</h2>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-[#8b949e] uppercase tracking-widest font-bold ml-1">Max Session Trades</label>
+                  <input 
+                    type="number" 
+                    value={maxTradesPerSession}
+                    onChange={(e) => setMaxTradesPerSession(Number(e.target.value))}
+                    disabled={isBotRunning}
+                    className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#d29922]/50 transition-all font-mono"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-[#8b949e] uppercase tracking-widest font-bold ml-1">Cooldown (Mins)</label>
+                  <input 
+                    type="number" 
+                    value={cooldownMinutes}
+                    onChange={(e) => setCooldownMinutes(Number(e.target.value))}
+                    disabled={isBotRunning}
+                    className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#d29922]/50 transition-all font-mono"
+                  />
+                </div>
+              </div>
+              <p className="text-[10px] text-[#8b949e] italic leading-relaxed">
+                * Prevents emotional trading by locking the bot after a set number of trades.
+              </p>
             </div>
           </section>
         </div>
