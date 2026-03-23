@@ -12,12 +12,25 @@ import {
   ChevronRight,
   History,
   ShieldCheck,
-  Zap
+  Zap,
+  RefreshCw,
+  Clock,
+  List
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DerivService, Tick } from './services/derivService';
 
 // --- Types ---
+interface SessionSummary {
+  id: string;
+  startTime: string;
+  endTime: string;
+  duration: string;
+  profit: number;
+  trades: number;
+  symbol: string;
+}
+
 interface BotStats {
   totalTrades: number;
   wins: number;
@@ -37,6 +50,7 @@ interface BotLog {
 export default function App() {
   // --- State ---
   const [apiToken, setApiToken] = useState('');
+  const [saveToken, setSaveToken] = useState(false);
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [isBotRunning, setIsBotRunning] = useState(false);
   const [symbols, setSymbols] = useState<any[]>([]);
@@ -54,6 +68,16 @@ export default function App() {
   const [tradesThisSession, setTradesThisSession] = useState(0);
   const [cooldownRemaining, setCooldownRemaining] = useState<string | null>(null);
   
+  // --- Auto Trading ---
+  const [isAutoTrading, setIsAutoTrading] = useState(false);
+  const [currentSessionCount, setCurrentSessionCount] = useState(0);
+  const [autoTradeHistory, setAutoTradeHistory] = useState<SessionSummary[]>([]);
+  const [sessionStartTime, setSessionStartTime] = useState<number | null>(null);
+  const [sessionStartProfit, setSessionStartProfit] = useState(0);
+  const [showHistory, setShowHistory] = useState(false);
+  
+  const autoSymbols = ['1HZ25V', '1HZ30V', '1HZ100V'];
+
   const [stats, setStats] = useState<BotStats>({
     totalTrades: 0,
     wins: 0,
@@ -75,12 +99,31 @@ export default function App() {
   const isBotRunningRef = useRef(false);
   const isTradingRef = useRef(false);
   const currentStepRef = useRef(0);
+  const takeProfitRef = useRef(takeProfit);
+  const stopLossRef = useRef(stopLoss);
+  const stakeRef = useRef(stake);
+  const martingaleMultiplierRef = useRef(martingaleMultiplier);
+  const maxMartingaleStepsRef = useRef(maxMartingaleSteps);
 
   // Sync refs with state
   useEffect(() => { statsRef.current = stats; }, [stats]);
   useEffect(() => { lastDigitsRef.current = lastDigits; }, [lastDigits]);
   useEffect(() => { isBotRunningRef.current = isBotRunning; }, [isBotRunning]);
   useEffect(() => { currentStepRef.current = currentStep; }, [currentStep]);
+  useEffect(() => { takeProfitRef.current = takeProfit; }, [takeProfit]);
+  useEffect(() => { stopLossRef.current = stopLoss; }, [stopLoss]);
+  useEffect(() => { stakeRef.current = stake; }, [stake]);
+  useEffect(() => { martingaleMultiplierRef.current = martingaleMultiplier; }, [martingaleMultiplier]);
+  useEffect(() => { maxMartingaleStepsRef.current = maxMartingaleSteps; }, [maxMartingaleSteps]);
+
+  // Load saved token on mount
+  useEffect(() => {
+    const savedToken = localStorage.getItem('deriv_api_token');
+    if (savedToken) {
+      setApiToken(savedToken);
+      setSaveToken(true);
+    }
+  }, []);
 
   // Cooldown Timer Effect
   useEffect(() => {
@@ -94,7 +137,13 @@ export default function App() {
         setCooldownEndTime(null);
         setCooldownRemaining(null);
         clearInterval(timer);
-        addLog('Cooldown period ended. You can trade again.', 'success');
+        addLog('Cooldown period ended.', 'success');
+        
+        // Auto-resume logic
+        if (isAutoTrading) {
+          addLog('Auto-Trading: Resuming next session...', 'info');
+          setTimeout(() => startBot(), 2000); // Small delay to ensure state sync
+        }
       } else {
         const minutes = Math.floor(diff / 60000);
         const seconds = Math.floor((diff % 60000) / 1000);
@@ -132,6 +181,11 @@ export default function App() {
         addLog(`Auth Error: ${auth.error.message}`, 'error');
         deriv.disconnect();
       } else {
+        if (saveToken) {
+          localStorage.setItem('deriv_api_token', apiToken);
+        } else {
+          localStorage.removeItem('deriv_api_token');
+        }
         derivRef.current = deriv;
         setIsAuthorized(true);
         const initialStake = Math.round(stake * 100) / 100;
@@ -165,23 +219,72 @@ export default function App() {
     // Capital Check
     if (stats.balance < stake) {
       addLog('Insufficient balance to start', 'error');
+      setIsAutoTrading(false);
       return;
     }
 
+    // Auto-trading symbol rotation
+    let symbolToUse = selectedSymbol;
+    if (isAutoTrading) {
+      symbolToUse = autoSymbols[currentSessionCount % autoSymbols.length];
+      setSelectedSymbol(symbolToUse);
+      addLog(`Auto-Trading: Session ${currentSessionCount + 1}/3 | Symbol: ${symbolToUse}`, 'info');
+    }
+
     setIsBotRunning(true);
+    isBotRunningRef.current = true;
     setCurrentStep(0);
+    currentStepRef.current = 0;
     setTradesThisSession(0);
+    setSessionStartTime(Date.now());
+    setSessionStartProfit(stats.totalProfit);
     const initialStake = Math.round(stake * 100) / 100;
     setStats(prev => ({ ...prev, currentStake: initialStake }));
     addLog(`Bot started. Capital: $${stats.balance.toFixed(2)} | Target: +$${takeProfit}`, 'info');
 
-    derivRef.current.subscribeTicks(selectedSymbol, handleTick);
+    derivRef.current.subscribeTicks(symbolToUse, handleTick);
   };
 
-  const stopBot = () => {
+  const stopBot = (reason = 'Manual') => {
+    if (!isBotRunningRef.current) return;
+    
     setIsBotRunning(false);
+    isBotRunningRef.current = false;
     derivRef.current?.unsubscribeTicks(selectedSymbol);
-    addLog('Bot stopped', 'info');
+    addLog(`Bot stopped: ${reason}`, 'info');
+
+    // Handle Auto-Trading Session End
+    if (isAutoTrading && sessionStartTime !== null) {
+      const endTime = Date.now();
+      const durationMs = endTime - sessionStartTime;
+      const minutes = Math.floor(durationMs / 60000);
+      const seconds = Math.floor((durationMs % 60000) / 1000);
+      
+      const sessionProfit = stats.totalProfit - sessionStartProfit;
+      
+      const summary: SessionSummary = {
+        id: Math.random().toString(36).substr(2, 9),
+        startTime: new Date(sessionStartTime).toLocaleTimeString(),
+        endTime: new Date(endTime).toLocaleTimeString(),
+        duration: `${minutes}m ${seconds}s`,
+        profit: sessionProfit,
+        trades: tradesThisSession,
+        symbol: selectedSymbol
+      };
+      
+      setAutoTradeHistory(prev => [summary, ...prev]);
+      
+      const nextSession = currentSessionCount + 1;
+      setCurrentSessionCount(nextSession);
+      
+      if (nextSession >= 3) {
+        setIsAutoTrading(false);
+        setCurrentSessionCount(0);
+        addLog('Auto-Trading completed 3 sessions. All tasks finished.', 'success');
+      } else {
+        addLog(`Auto-Trading: Session ${nextSession}/3 finished. Waiting for cooldown...`, 'info');
+      }
+    }
   };
 
   const disconnectDeriv = () => {
@@ -189,6 +292,12 @@ export default function App() {
     derivRef.current = null;
     setIsAuthorized(false);
     setIsBotRunning(false);
+    
+    if (!saveToken) {
+      setApiToken('');
+      localStorage.removeItem('deriv_api_token');
+    }
+    
     addLog('Disconnected', 'info');
   };
   
@@ -248,6 +357,18 @@ export default function App() {
 
     const currentStake = statsRef.current.currentStake;
     
+    // Double check TP/SL before starting a new trade
+    if (statsRef.current.totalProfit >= takeProfitRef.current) {
+      stopBot('Take Profit already reached');
+      isTradingRef.current = false;
+      return;
+    }
+    if (statsRef.current.totalProfit <= -stopLossRef.current) {
+      stopBot('Stop Loss already reached');
+      isTradingRef.current = false;
+      return;
+    }
+
     // Safety check for $5 capital
     if (currentStake > statsRef.current.balance) {
       addLog(`Insufficient balance for next stake ($${currentStake.toFixed(2)})`, 'error');
@@ -260,48 +381,76 @@ export default function App() {
 
     try {
       const result = await derivRef.current.placeTrade(selectedSymbol, currentStake, type);
+      const newTotalProfit = statsRef.current.totalProfit + result.profit;
+      const newBalance = statsRef.current.balance + result.profit;
       
       if (result.isWin) {
         addLog(`Win! +$${result.profit.toFixed(2)}`, 'success');
         setCurrentStep(0);
+        currentStepRef.current = 0;
         setStats(prev => ({
           ...prev,
           wins: prev.wins + 1,
           totalTrades: prev.totalTrades + 1,
-          totalProfit: prev.totalProfit + result.profit,
-          balance: prev.balance + result.profit,
-          currentStake: stake,
+          totalProfit: newTotalProfit,
+          balance: newBalance,
+          currentStake: stakeRef.current,
         }));
+        // Update ref immediately for next check
+        statsRef.current = {
+          ...statsRef.current,
+          wins: statsRef.current.wins + 1,
+          totalTrades: statsRef.current.totalTrades + 1,
+          totalProfit: newTotalProfit,
+          balance: newBalance,
+          currentStake: stakeRef.current,
+        };
         setTradesThisSession(prev => prev + 1);
       } else {
         addLog(`Loss. -$${Math.abs(result.profit).toFixed(2)}`, 'error');
         const nextStep = currentStepRef.current + 1;
         
-        if (nextStep >= maxMartingaleSteps) {
+        if (nextStep >= maxMartingaleStepsRef.current) {
           addLog('Max Martingale steps reached. Resetting to base stake.', 'info');
           setCurrentStep(0);
+          currentStepRef.current = 0;
           setStats(prev => ({
             ...prev,
             losses: prev.losses + 1,
             totalTrades: prev.totalTrades + 1,
-            totalProfit: prev.totalProfit + result.profit,
-            balance: prev.balance + result.profit,
-            currentStake: stake,
+            totalProfit: newTotalProfit,
+            balance: newBalance,
+            currentStake: stakeRef.current,
           }));
+          statsRef.current = {
+            ...statsRef.current,
+            losses: statsRef.current.losses + 1,
+            totalTrades: statsRef.current.totalTrades + 1,
+            totalProfit: newTotalProfit,
+            balance: newBalance,
+            currentStake: stakeRef.current,
+          };
           setTradesThisSession(prev => prev + 1);
         } else {
           setCurrentStep(nextStep);
-          setStats(prev => {
-            const nextStake = Math.round(prev.currentStake * martingaleMultiplier * 100) / 100;
-            return {
-              ...prev,
-              losses: prev.losses + 1,
-              totalTrades: prev.totalTrades + 1,
-              totalProfit: prev.totalProfit + result.profit,
-              balance: prev.balance + result.profit,
-              currentStake: nextStake,
-            };
-          });
+          currentStepRef.current = nextStep;
+          const nextStake = Math.round(currentStake * martingaleMultiplierRef.current * 100) / 100;
+          setStats(prev => ({
+            ...prev,
+            losses: prev.losses + 1,
+            totalTrades: prev.totalTrades + 1,
+            totalProfit: newTotalProfit,
+            balance: newBalance,
+            currentStake: nextStake,
+          }));
+          statsRef.current = {
+            ...statsRef.current,
+            losses: statsRef.current.losses + 1,
+            totalTrades: statsRef.current.totalTrades + 1,
+            totalProfit: newTotalProfit,
+            balance: newBalance,
+            currentStake: nextStake,
+          };
           setTradesThisSession(prev => prev + 1);
         }
       }
@@ -310,18 +459,17 @@ export default function App() {
       if (tradesThisSession + 1 >= maxTradesPerSession) {
         const endTime = Date.now() + cooldownMinutes * 60000;
         setCooldownEndTime(endTime);
-        stopBot();
+        stopBot('Session Limit Reached');
         addLog(`OVER-TRADING DETECTED! Session limit of ${maxTradesPerSession} trades reached. Bot stopped for ${cooldownMinutes} minutes.`, 'error');
       }
 
       // TP/SL Logic
-      const currentProfit = statsRef.current.totalProfit;
-      if (currentProfit >= takeProfit) {
-        addLog(`Target Profit Reached: +$${currentProfit.toFixed(2)}`, 'success');
-        stopBot();
-      } else if (currentProfit <= -stopLoss) {
-        addLog(`Stop Loss Reached: -$${Math.abs(currentProfit).toFixed(2)}`, 'error');
-        stopBot();
+      if (newTotalProfit >= takeProfitRef.current) {
+        addLog(`Target Profit Reached: +$${newTotalProfit.toFixed(2)}`, 'success');
+        stopBot('Take Profit Reached');
+      } else if (newTotalProfit <= -stopLossRef.current) {
+        addLog(`Stop Loss Reached: -$${Math.abs(newTotalProfit).toFixed(2)}`, 'error');
+        stopBot('Stop Loss Reached');
       }
 
     } catch (err: any) {
@@ -348,6 +496,13 @@ export default function App() {
         
         {isAuthorized && (
           <div className="flex items-center gap-4">
+            <button 
+              onClick={() => setShowHistory(true)}
+              className="p-2 hover:bg-[#30363d] rounded-lg transition-colors text-[#8b949e] hover:text-white"
+              title="Auto-Trade History"
+            >
+              <List className="w-5 h-5" />
+            </button>
             <div className="text-right">
               <p className="text-xs text-[#8b949e] uppercase tracking-wider font-semibold">Balance</p>
               <p className="text-lg font-mono font-bold text-[#3fb950]">${stats.balance.toFixed(2)}</p>
@@ -406,6 +561,18 @@ export default function App() {
                       className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#1f6feb]/50 transition-all"
                     />
                   </div>
+                  <div className="flex items-center gap-2 px-1">
+                    <input 
+                      type="checkbox" 
+                      id="saveToken"
+                      checked={saveToken}
+                      onChange={(e) => setSaveToken(e.target.checked)}
+                      className="w-4 h-4 rounded border-[#30363d] bg-[#0d1117] text-[#1f6feb] focus:ring-[#1f6feb]/50"
+                    />
+                    <label htmlFor="saveToken" className="text-xs text-[#8b949e] cursor-pointer select-none">
+                      Save connection for next time
+                    </label>
+                  </div>
                   <button 
                     onClick={connectDeriv}
                     disabled={isConnecting}
@@ -419,11 +586,42 @@ export default function App() {
                   </button>
                 </>
               ) : (
-                <div className="flex items-center gap-3 p-3 bg-[#3fb950]/10 border border-[#3fb950]/20 rounded-xl">
-                  <CheckCircle2 className="w-5 h-5 text-[#3fb950]" />
-                  <div className="text-sm">
-                    <p className="font-semibold text-[#3fb950]">Authenticated</p>
-                    <p className="text-xs text-[#8b949e]">Ready to trade</p>
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-3 bg-[#3fb950]/10 border border-[#3fb950]/20 rounded-xl">
+                    <div className="flex items-center gap-3">
+                      <CheckCircle2 className="w-5 h-5 text-[#3fb950]" />
+                      <div className="text-sm">
+                        <p className="font-semibold text-[#3fb950]">Authenticated</p>
+                        <p className="text-xs text-[#8b949e]">Ready to trade</p>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={disconnectDeriv}
+                      disabled={isBotRunning}
+                      className="text-xs text-[#f85149] hover:text-[#da3633] disabled:opacity-50 font-bold uppercase tracking-wider transition-colors"
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2 px-1">
+                    <input 
+                      type="checkbox" 
+                      id="saveTokenAuth"
+                      checked={saveToken}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setSaveToken(checked);
+                        if (checked) {
+                          localStorage.setItem('deriv_api_token', apiToken);
+                        } else {
+                          localStorage.removeItem('deriv_api_token');
+                        }
+                      }}
+                      className="w-4 h-4 rounded border-[#30363d] bg-[#0d1117] text-[#1f6feb] focus:ring-[#1f6feb]/50"
+                    />
+                    <label htmlFor="saveTokenAuth" className="text-xs text-[#8b949e] cursor-pointer select-none">
+                      Save connection for next time
+                    </label>
                   </div>
                 </div>
               )}
@@ -542,6 +740,44 @@ export default function App() {
                   </button>
                 )}
               </div>
+            </div>
+          </section>
+
+          {/* Auto Trading Card */}
+          <section className="bg-[#161b22] border border-[#30363d] rounded-2xl overflow-hidden shadow-sm">
+            <div className="px-5 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#1c2128]">
+              <div className="flex items-center gap-2">
+                <RefreshCw className={`w-4 h-4 ${isAutoTrading ? 'text-[#3fb950] animate-spin-slow' : 'text-[#8b949e]'}`} />
+                <h2 className="font-semibold text-sm uppercase tracking-wide">Auto Trading</h2>
+              </div>
+              <button 
+                onClick={() => setIsAutoTrading(!isAutoTrading)}
+                disabled={isBotRunning}
+                className={`relative inline-flex h-5 w-10 items-center rounded-full transition-colors focus:outline-none ${isAutoTrading ? 'bg-[#3fb950]' : 'bg-[#30363d]'}`}
+              >
+                <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${isAutoTrading ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
+            <div className="p-5 space-y-3">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8b949e]">Status</span>
+                <span className={isAutoTrading ? 'text-[#3fb950] font-bold' : 'text-[#8b949e]'}>
+                  {isAutoTrading ? 'ENABLED' : 'DISABLED'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8b949e]">Session Progress</span>
+                <span className="text-white font-mono">{currentSessionCount}/3</span>
+              </div>
+              <div className="w-full bg-[#0d1117] h-1.5 rounded-full overflow-hidden">
+                <div 
+                  className="bg-[#3fb950] h-full transition-all duration-500" 
+                  style={{ width: `${(currentSessionCount / 3) * 100}%` }}
+                />
+              </div>
+              <p className="text-[10px] text-[#8b949e] italic leading-relaxed mt-2">
+                * Cycles through Vol 25(1s), 30(1s), and 100(1s) across 3 sessions with cooldowns.
+              </p>
             </div>
           </section>
 
@@ -714,6 +950,87 @@ export default function App() {
           Past performance does not guarantee future results.
         </p>
       </footer>
+
+      {/* History Modal */}
+      <AnimatePresence>
+        {showHistory && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowHistory(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-2xl bg-[#161b22] border border-[#30363d] rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+            >
+              <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#1c2128]">
+                <div className="flex items-center gap-2">
+                  <History className="w-5 h-5 text-[#1f6feb]" />
+                  <h2 className="font-bold text-lg">Auto-Trade Session History</h2>
+                </div>
+                <button 
+                  onClick={() => setShowHistory(false)}
+                  className="p-2 hover:bg-[#30363d] rounded-xl transition-colors"
+                >
+                  <Square className="w-5 h-5 text-[#8b949e]" />
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                {autoTradeHistory.length === 0 ? (
+                  <div className="text-center py-12">
+                    <History className="w-12 h-12 text-[#30363d] mx-auto mb-4" />
+                    <p className="text-[#8b949e]">No session history yet.</p>
+                  </div>
+                ) : (
+                  autoTradeHistory.map((session) => (
+                    <div key={session.id} className="bg-[#0d1117] border border-[#30363d] rounded-2xl p-5 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Zap className="w-4 h-4 text-[#1f6feb]" />
+                          <span className="font-bold text-sm">{session.symbol}</span>
+                        </div>
+                        <span className={`text-sm font-bold ${session.profit >= 0 ? 'text-[#3fb950]' : 'text-[#f85149]'}`}>
+                          {session.profit >= 0 ? '+' : ''}${session.profit.toFixed(2)}
+                        </span>
+                      </div>
+                      
+                      <div className="grid grid-cols-3 gap-4 text-[10px] uppercase tracking-widest text-[#8b949e] font-bold">
+                        <div>
+                          <p className="mb-1">Duration</p>
+                          <p className="text-white font-mono">{session.duration}</p>
+                        </div>
+                        <div>
+                          <p className="mb-1">Trades</p>
+                          <p className="text-white font-mono">{session.trades}</p>
+                        </div>
+                        <div>
+                          <p className="mb-1">Time</p>
+                          <p className="text-white font-mono">{session.startTime} - {session.endTime}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              
+              <div className="p-6 border-t border-[#30363d] bg-[#1c2128]">
+                <button 
+                  onClick={() => setAutoTradeHistory([])}
+                  className="w-full py-3 border border-[#30363d] hover:bg-[#f85149]/10 hover:border-[#f85149]/30 hover:text-[#f85149] rounded-xl transition-all text-sm font-bold uppercase tracking-widest"
+                >
+                  Clear History
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
