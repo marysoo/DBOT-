@@ -88,13 +88,13 @@ export class DerivService {
     return this.send({ active_symbols: 'full', product_type: 'basic' });
   }
 
-  async placeTrade(symbol: string, amount: number, type: 'DIGITEVEN' | 'DIGITODD'): Promise<TradeResult> {
+  async placeTrade(symbol: string, amount: number, type: 'DIGITEVEN' | 'DIGITODD' | 'DIGITUNDER', barrier?: number): Promise<TradeResult> {
     if (!this.isAuthorized) throw new Error('Not authorized');
 
-    console.log(`[Trade] Requesting proposal: ${type} | ${symbol} | $${amount}`);
+    console.log(`[Trade] Requesting proposal: ${type} | ${symbol} | $${amount}${barrier !== undefined ? ` | Barrier: ${barrier}` : ''}`);
 
     // 1. Get proposal
-    const proposal = await this.send({
+    const proposalParams: any = {
       proposal: 1,
       amount: amount,
       basis: 'stake',
@@ -103,7 +103,13 @@ export class DerivService {
       duration: 1,
       duration_unit: 't',
       symbol: symbol,
-    });
+    };
+
+    if (barrier !== undefined) {
+      proposalParams.barrier = barrier.toString();
+    }
+
+    const proposal = await this.send(proposalParams);
 
     if (proposal.error) {
       console.error('[Trade] Proposal Error:', proposal.error);

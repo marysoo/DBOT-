@@ -68,6 +68,9 @@ export default function App() {
   const [tradesThisSession, setTradesThisSession] = useState(0);
   const [cooldownRemaining, setCooldownRemaining] = useState<string | null>(null);
   
+  // --- Bot Selection ---
+  const [botType, setBotType] = useState<'EVEN_ODD' | 'OVER_UNDER'>('EVEN_ODD');
+
   // --- Auto Trading ---
   const [isAutoTrading, setIsAutoTrading] = useState(false);
   const [currentSessionCount, setCurrentSessionCount] = useState(0);
@@ -104,6 +107,18 @@ export default function App() {
   const stakeRef = useRef(stake);
   const martingaleMultiplierRef = useRef(martingaleMultiplier);
   const maxMartingaleStepsRef = useRef(maxMartingaleSteps);
+  const botTypeRef = useRef(botType);
+  const selectedSymbolRef = useRef(selectedSymbol);
+  const symbolsRef = useRef(symbols);
+
+  useEffect(() => {
+    if (botType === 'OVER_UNDER' && symbols.length > 0) {
+      const v100 = symbols.find(s => s.symbol === 'R_100' || s.symbol === '1HZ100V')?.symbol || 'R_100';
+      if (!selectedSymbol.includes('100')) {
+        setSelectedSymbol(v100);
+      }
+    }
+  }, [botType, symbols, selectedSymbol]);
 
   // Sync refs with state
   useEffect(() => { statsRef.current = stats; }, [stats]);
@@ -115,6 +130,9 @@ export default function App() {
   useEffect(() => { stakeRef.current = stake; }, [stake]);
   useEffect(() => { martingaleMultiplierRef.current = martingaleMultiplier; }, [martingaleMultiplier]);
   useEffect(() => { maxMartingaleStepsRef.current = maxMartingaleSteps; }, [maxMartingaleSteps]);
+  useEffect(() => { botTypeRef.current = botType; }, [botType]);
+  useEffect(() => { selectedSymbolRef.current = selectedSymbol; }, [selectedSymbol]);
+  useEffect(() => { symbolsRef.current = symbols; }, [symbols]);
 
   // Load saved token on mount
   useEffect(() => {
@@ -226,9 +244,23 @@ export default function App() {
     // Auto-trading symbol rotation
     let symbolToUse = selectedSymbol;
     if (isAutoTrading) {
-      symbolToUse = autoSymbols[currentSessionCount % autoSymbols.length];
-      setSelectedSymbol(symbolToUse);
-      addLog(`Auto-Trading: Session ${currentSessionCount + 1}/3 | Symbol: ${symbolToUse}`, 'info');
+      if (botType === 'EVEN_ODD') {
+        symbolToUse = autoSymbols[currentSessionCount % autoSymbols.length];
+        setSelectedSymbol(symbolToUse);
+        addLog(`Auto-Trading: Session ${currentSessionCount + 1}/3 | Symbol: ${symbolToUse}`, 'info');
+      } else {
+        // Find best Volatility 100 symbol
+        const v100 = symbols.find(s => s.symbol === 'R_100' || s.symbol === '1HZ100V')?.symbol || 'R_100';
+        symbolToUse = v100;
+        setSelectedSymbol(v100);
+        addLog(`Auto-Trading: Session ${currentSessionCount + 1}/3 | Symbol: ${v100}`, 'info');
+      }
+    } else if (botType === 'OVER_UNDER') {
+      if (!selectedSymbol.includes('100')) {
+        const v100 = symbols.find(s => s.symbol === 'R_100' || s.symbol === '1HZ100V')?.symbol || 'R_100';
+        setSelectedSymbol(v100);
+        symbolToUse = v100;
+      }
     }
 
     setIsBotRunning(true);
@@ -319,8 +351,19 @@ export default function App() {
   };
 
   const handleTick = async (tick: any) => {
-    const symbolInfo = symbols.find(s => s.symbol === selectedSymbol);
-    const pipSize = symbolInfo?.pip_size || 0;
+    const currentSymbol = selectedSymbolRef.current;
+    const currentBotType = botTypeRef.current;
+    
+    const symbolInfo = symbolsRef.current.find(s => s.symbol === currentSymbol);
+    // Default pip_size for Volatility indices is usually 2, except for some like 10 (3) or 100 (2)
+    // For R_100 it is 2.
+    let pipSize = symbolInfo?.pip_size;
+    if (pipSize === undefined) {
+      if (currentSymbol.includes('100')) pipSize = 2;
+      else if (currentSymbol.includes('10')) pipSize = 3;
+      else pipSize = 2;
+    }
+    
     const lastDigit = parseInt(tick.quote.toFixed(pipSize).slice(-1));
 
     const newDigits = [...lastDigitsRef.current, lastDigit].slice(-10);
@@ -329,29 +372,31 @@ export default function App() {
 
     if (!isBotRunningRef.current || isTradingRef.current) return;
 
-    // Pro Strategy: Look for 4 consecutive instead of 3 to reduce false signals
-    const last4 = newDigits.slice(-4);
-    if (last4.length < 4) return;
+    if (currentBotType === 'EVEN_ODD') {
+      // Strategy: 4 consecutive same type -> counter trade
+      const last4 = newDigits.slice(-4);
+      if (last4.length < 4) return;
 
-    const allOdd = last4.every(d => d % 2 !== 0);
-    const allEven = last4.every(d => d % 2 === 0);
+      const allOdd = last4.every(d => d % 2 !== 0);
+      const allEven = last4.every(d => d % 2 === 0);
 
-    let tradeType: 'DIGITEVEN' | 'DIGITODD' | null = null;
-    
-    if (allOdd) {
-      addLog('Strategy: 4 Odds detected. Counter-trading EVEN.', 'info');
-      tradeType = 'DIGITEVEN';
-    } else if (allEven) {
-      addLog('Strategy: 4 Evens detected. Counter-trading ODD.', 'info');
-      tradeType = 'DIGITODD';
-    }
-
-    if (tradeType) {
-      executeTrade(tradeType);
+      if (allOdd) {
+        addLog('Strategy: 4 Odds detected. Counter-trading EVEN.', 'info');
+        executeTrade('DIGITEVEN');
+      } else if (allEven) {
+        addLog('Strategy: 4 Evens detected. Counter-trading ODD.', 'info');
+        executeTrade('DIGITODD');
+      }
+    } else {
+      // Strategy: Over/Under (specifically Under 5 on Volatility 100 when digit is 0 or 1)
+      if (currentSymbol.includes('100') && (lastDigit === 0 || lastDigit === 1)) {
+        addLog(`Strategy: Digit ${lastDigit} detected. Trading UNDER 5.`, 'info');
+        executeTrade('DIGITUNDER', 5);
+      }
     }
   };
 
-  const executeTrade = async (type: 'DIGITEVEN' | 'DIGITODD') => {
+  const executeTrade = async (type: 'DIGITEVEN' | 'DIGITODD' | 'DIGITUNDER', barrier?: number) => {
     if (isTradingRef.current || !derivRef.current) return;
     isTradingRef.current = true;
 
@@ -377,10 +422,10 @@ export default function App() {
       return;
     }
 
-    addLog(`Trade #${statsRef.current.totalTrades + 1}: ${type} | Stake: $${currentStake.toFixed(2)}`, 'trade');
+    addLog(`Trade #${statsRef.current.totalTrades + 1}: ${type}${barrier !== undefined ? ` LDP ${barrier}` : ''} | Stake: $${currentStake.toFixed(2)}`, 'trade');
 
     try {
-      const result = await derivRef.current.placeTrade(selectedSymbol, currentStake, type);
+      const result = await derivRef.current.placeTrade(selectedSymbolRef.current, currentStake, type, barrier);
       const newTotalProfit = statsRef.current.totalProfit + result.profit;
       const newBalance = statsRef.current.balance + result.profit;
       
@@ -636,19 +681,42 @@ export default function App() {
             </div>
             <div className="p-5 space-y-5">
               <div className="space-y-1.5">
+                <label className="text-xs text-[#8b949e] ml-1">Select Bot Strategy</label>
+                <select 
+                  value={botType}
+                  onChange={(e) => setBotType(e.target.value as any)}
+                  disabled={isBotRunning}
+                  className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#1f6feb]/50 disabled:opacity-50 font-bold text-[#1f6feb]"
+                >
+                  <option value="EVEN_ODD">Bot 1: Even/Odd Strategy</option>
+                  <option value="OVER_UNDER">Bot 2: Over/Under Strategy (R_100)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1.5">
                 <label className="text-xs text-[#8b949e] ml-1">Trading Instrument</label>
                 <select 
                   value={selectedSymbol}
                   onChange={(e) => setSelectedSymbol(e.target.value)}
-                  disabled={isBotRunning}
+                  disabled={isBotRunning || botType === 'OVER_UNDER'}
                   className="w-full bg-[#0d1117] border border-[#30363d] rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#1f6feb]/50 disabled:opacity-50"
                 >
-                  {symbols.length > 0 ? (
-                    symbols.map(s => (
-                      <option key={s.symbol} value={s.symbol}>{s.display_name}</option>
-                    ))
+                  {botType === 'OVER_UNDER' ? (
+                    symbols.filter(s => s.symbol.includes('100')).length > 0 ? (
+                      symbols.filter(s => s.symbol.includes('100')).map(s => (
+                        <option key={s.symbol} value={s.symbol}>{s.display_name}</option>
+                      ))
+                    ) : (
+                      <option value="R_100">Volatility 100 Index</option>
+                    )
                   ) : (
-                    <option value="R_100">Volatility 100 Index</option>
+                    symbols.length > 0 ? (
+                      symbols.map(s => (
+                        <option key={s.symbol} value={s.symbol}>{s.display_name}</option>
+                      ))
+                    ) : (
+                      <option value="R_100">Volatility 100 Index</option>
+                    )
                   )}
                 </select>
               </div>
@@ -776,7 +844,7 @@ export default function App() {
                 />
               </div>
               <p className="text-[10px] text-[#8b949e] italic leading-relaxed mt-2">
-                * Cycles through Vol 25(1s), 30(1s), and 100(1s) across 3 sessions with cooldowns.
+                * {botType === 'EVEN_ODD' ? 'Cycles through Vol 25(1s), 30(1s), and 100(1s)' : 'Trades Volatility 100 Index only'} across 3 sessions with cooldowns.
               </p>
             </div>
           </section>
@@ -890,14 +958,28 @@ export default function App() {
                 <div className="text-center space-y-2">
                   <p className="text-xs text-[#8b949e] uppercase tracking-widest font-semibold">Pro Strategy</p>
                   <div className="flex flex-col items-center gap-2 text-sm">
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-2 h-2 rounded-full bg-[#f85149]" />
-                      <span>4 Odds &rarr; Bet Even</span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-2 h-2 rounded-full bg-[#3fb950]" />
-                      <span>4 Evens &rarr; Bet Odd</span>
-                    </div>
+                    {botType === 'EVEN_ODD' ? (
+                      <>
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-2 h-2 rounded-full bg-[#f85149]" />
+                          <span>4 Odds &rarr; Bet Even</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-2 h-2 rounded-full bg-[#3fb950]" />
+                          <span>4 Evens &rarr; Bet Odd</span>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-2 h-2 rounded-full bg-[#1f6feb]" />
+                          <span>Digit 0 or 1 &rarr; Bet Under 5</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[#8b949e] text-[10px]">
+                          <span>(Volatility 100 Index Only)</span>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -954,81 +1036,88 @@ export default function App() {
       {/* History Modal */}
       <AnimatePresence>
         {showHistory && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+            onClick={() => setShowHistory(false)}
+          >
             <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowHistory(false)}
-              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative w-full max-w-2xl bg-[#161b22] border border-[#30363d] rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-[#161b22] border border-[#30363d] rounded-3xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col shadow-2xl"
+              onClick={e => e.stopPropagation()}
             >
-              <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#1c2128]">
-                <div className="flex items-center gap-2">
-                  <History className="w-5 h-5 text-[#1f6feb]" />
-                  <h2 className="font-bold text-lg">Auto-Trade Session History</h2>
+              <div className="px-6 py-5 border-b border-[#30363d] flex items-center justify-between bg-[#1c2128]">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-[#1f6feb]/10 rounded-xl flex items-center justify-center">
+                    <History className="w-6 h-6 text-[#1f6feb]" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold">Auto-Trade History</h2>
+                    <p className="text-xs text-[#8b949e]">Performance across all sessions</p>
+                  </div>
                 </div>
                 <button 
                   onClick={() => setShowHistory(false)}
-                  className="p-2 hover:bg-[#30363d] rounded-xl transition-colors"
+                  className="p-2 hover:bg-[#30363d] rounded-full transition-colors"
                 >
-                  <Square className="w-5 h-5 text-[#8b949e]" />
+                  <LogOut className="w-5 h-5 rotate-180" />
                 </button>
               </div>
               
               <div className="flex-1 overflow-y-auto p-6 space-y-4">
                 {autoTradeHistory.length === 0 ? (
-                  <div className="text-center py-12">
-                    <History className="w-12 h-12 text-[#30363d] mx-auto mb-4" />
-                    <p className="text-[#8b949e]">No session history yet.</p>
+                  <div className="h-64 flex flex-col items-center justify-center text-[#484f58] gap-4">
+                    <Clock className="w-12 h-12 opacity-20" />
+                    <p className="italic">No auto-trade history yet</p>
                   </div>
                 ) : (
                   autoTradeHistory.map((session) => (
-                    <div key={session.id} className="bg-[#0d1117] border border-[#30363d] rounded-2xl p-5 space-y-4">
-                      <div className="flex items-center justify-between">
+                    <div key={session.id} className="bg-[#0d1117] border border-[#30363d] rounded-2xl p-5 flex items-center justify-between group hover:border-[#1f6feb]/50 transition-all">
+                      <div className="space-y-1">
                         <div className="flex items-center gap-2">
-                          <Zap className="w-4 h-4 text-[#1f6feb]" />
-                          <span className="font-bold text-sm">{session.symbol}</span>
+                          <span className="text-xs font-bold text-[#1f6feb] uppercase tracking-widest">{session.symbol}</span>
+                          <span className="text-[10px] text-[#484f58]">•</span>
+                          <span className="text-xs text-[#8b949e]">{session.startTime} - {session.endTime}</span>
                         </div>
-                        <span className={`text-sm font-bold ${session.profit >= 0 ? 'text-[#3fb950]' : 'text-[#f85149]'}`}>
-                          {session.profit >= 0 ? '+' : ''}${session.profit.toFixed(2)}
-                        </span>
+                        <div className="flex items-center gap-4 text-sm">
+                          <div className="flex items-center gap-1">
+                            <Activity className="w-3 h-3 text-[#8b949e]" />
+                            <span className="font-mono">{session.trades} trades</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-[#8b949e]" />
+                            <span className="font-mono">{session.duration}</span>
+                          </div>
+                        </div>
                       </div>
-                      
-                      <div className="grid grid-cols-3 gap-4 text-[10px] uppercase tracking-widest text-[#8b949e] font-bold">
-                        <div>
-                          <p className="mb-1">Duration</p>
-                          <p className="text-white font-mono">{session.duration}</p>
-                        </div>
-                        <div>
-                          <p className="mb-1">Trades</p>
-                          <p className="text-white font-mono">{session.trades}</p>
-                        </div>
-                        <div>
-                          <p className="mb-1">Time</p>
-                          <p className="text-white font-mono">{session.startTime} - {session.endTime}</p>
-                        </div>
+                      <div className={`text-xl font-mono font-bold ${session.profit >= 0 ? 'text-[#3fb950]' : 'text-[#f85149]'}`}>
+                        {session.profit >= 0 ? '+' : ''}${session.profit.toFixed(2)}
                       </div>
                     </div>
                   ))
                 )}
               </div>
               
-              <div className="p-6 border-t border-[#30363d] bg-[#1c2128]">
-                <button 
-                  onClick={() => setAutoTradeHistory([])}
-                  className="w-full py-3 border border-[#30363d] hover:bg-[#f85149]/10 hover:border-[#f85149]/30 hover:text-[#f85149] rounded-xl transition-all text-sm font-bold uppercase tracking-widest"
-                >
-                  Clear History
-                </button>
-              </div>
+              {autoTradeHistory.length > 0 && (
+                <div className="p-6 border-t border-[#30363d] bg-[#1c2128]">
+                  <button 
+                    onClick={() => {
+                      if (confirm('Clear all auto-trade history?')) {
+                        setAutoTradeHistory([]);
+                      }
+                    }}
+                    className="w-full py-3 text-xs font-bold text-[#f85149] hover:bg-[#f85149]/10 rounded-xl transition-all uppercase tracking-widest"
+                  >
+                    Clear History
+                  </button>
+                </div>
+              )}
             </motion.div>
-          </div>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>

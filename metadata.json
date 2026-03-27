@@ -1,5 +1,5 @@
 {
   "name": "Deriv Pro Bot v2",
-  "description": "Professional automated trading bot for Deriv.com, optimized for micro-accounts ($5+) with advanced digit pattern recognition and smart Martingale risk management.",
+  "description": "Professional dual-strategy trading bot for Deriv.com. Features Bot 1 (Even/Odd counter-trading) and Bot 2 (Volatility 100 Index Over/Under strategy), both with auto-trading, session management, and smart risk controls.",
   "requestFramePermissions": []
 }
