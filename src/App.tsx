@@ -47,6 +47,17 @@ interface BotLog {
   type: 'info' | 'success' | 'error' | 'trade';
 }
 
+interface TradeRecord {
+  id: string;
+  time: string;
+  symbol: string;
+  type: string;
+  stake: number;
+  profit: number;
+  isWin: boolean;
+  balance: number;
+}
+
 export default function App() {
   // --- State ---
   const [apiToken, setApiToken] = useState('');
@@ -91,6 +102,7 @@ export default function App() {
   });
 
   const [logs, setLogs] = useState<BotLog[]>([]);
+  const [trades, setTrades] = useState<TradeRecord[]>([]);
   const [lastDigits, setLastDigits] = useState<number[]>([]);
   const [isConnecting, setIsConnecting] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
@@ -345,6 +357,7 @@ export default function App() {
       balance: prev.balance,
     }));
     setLogs([]);
+    setTrades([]);
     setLastDigits([]);
     setCurrentStep(0);
     addLog('Session stats reset', 'info');
@@ -366,11 +379,17 @@ export default function App() {
     
     const lastDigit = parseInt(tick.quote.toFixed(pipSize).slice(-1));
 
-    const newDigits = [...lastDigitsRef.current, lastDigit].slice(-10);
+    const newDigits = [...lastDigitsRef.current, lastDigit].slice(-50);
     setLastDigits(newDigits);
     lastDigitsRef.current = newDigits;
 
     if (!isBotRunningRef.current || isTradingRef.current) return;
+
+    // --- Trend Filter Logic ---
+    const evensCount = newDigits.filter(d => d % 2 === 0).length;
+    const oddsCount = newDigits.length - evensCount;
+    const evenPercent = (evensCount / newDigits.length) * 100;
+    const oddPercent = (oddsCount / newDigits.length) * 100;
 
     if (currentBotType === 'EVEN_ODD') {
       // Strategy: 4 consecutive same type -> counter trade
@@ -381,9 +400,19 @@ export default function App() {
       const allEven = last4.every(d => d % 2 === 0);
 
       if (allOdd) {
+        // We want to bet EVEN. Check if market is Odd-heavy (> 60%)
+        if (oddPercent > 60) {
+          addLog(`Trend Filter: Skipped EVEN bet (Market is ${oddPercent.toFixed(0)}% ODD)`, 'info');
+          return;
+        }
         addLog('Strategy: 4 Odds detected. Counter-trading EVEN.', 'info');
         executeTrade('DIGITEVEN');
       } else if (allEven) {
+        // We want to bet ODD. Check if market is Even-heavy (> 60%)
+        if (evenPercent > 60) {
+          addLog(`Trend Filter: Skipped ODD bet (Market is ${evenPercent.toFixed(0)}% EVEN)`, 'info');
+          return;
+        }
         addLog('Strategy: 4 Evens detected. Counter-trading ODD.', 'info');
         executeTrade('DIGITODD');
       }
@@ -431,6 +460,19 @@ export default function App() {
       
       if (result.isWin) {
         addLog(`Win! +$${result.profit.toFixed(2)}`, 'success');
+        
+        const tradeRecord: TradeRecord = {
+          id: Math.random().toString(36).substr(2, 9),
+          time: new Date().toLocaleTimeString(),
+          symbol: selectedSymbolRef.current,
+          type: type,
+          stake: currentStake,
+          profit: result.profit,
+          isWin: true,
+          balance: newBalance
+        };
+        setTrades(prev => [tradeRecord, ...prev].slice(0, 50));
+
         setCurrentStep(0);
         currentStepRef.current = 0;
         setStats(prev => ({
@@ -453,6 +495,19 @@ export default function App() {
         setTradesThisSession(prev => prev + 1);
       } else {
         addLog(`Loss. -$${Math.abs(result.profit).toFixed(2)}`, 'error');
+        
+        const tradeRecord: TradeRecord = {
+          id: Math.random().toString(36).substr(2, 9),
+          time: new Date().toLocaleTimeString(),
+          symbol: selectedSymbolRef.current,
+          type: type,
+          stake: currentStake,
+          profit: result.profit,
+          isWin: false,
+          balance: newBalance
+        };
+        setTrades(prev => [tradeRecord, ...prev].slice(0, 50));
+
         const nextStep = currentStepRef.current + 1;
         
         if (nextStep >= maxMartingaleStepsRef.current) {
@@ -916,8 +971,8 @@ export default function App() {
             />
           </div>
 
-          {/* Visualizer & Logs */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Visualizer, Logs & Trade History */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             
             {/* Digit Visualizer */}
             <section className="bg-[#161b22] border border-[#30363d] rounded-2xl overflow-hidden flex flex-col h-[400px]">
@@ -934,6 +989,33 @@ export default function App() {
                   ))}
                 </div>
               </div>
+              
+              {/* Trend Filter Indicator */}
+              <div className="px-5 py-2 bg-[#0d1117] border-b border-[#30363d] flex items-center justify-between text-[10px]">
+                <div className="flex items-center gap-2">
+                  <span className="text-[#8b949e] uppercase font-bold tracking-widest">Trend (50 Digits):</span>
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1">
+                      <div className="w-1.5 h-1.5 rounded-full bg-[#3fb950]" />
+                      <span className="text-[#3fb950] font-mono">E: {((lastDigits.filter(d => d % 2 === 0).length / Math.max(1, lastDigits.length)) * 100).toFixed(0)}%</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <div className="w-1.5 h-1.5 rounded-full bg-[#f85149]" />
+                      <span className="text-[#f85149] font-mono">O: {((lastDigits.filter(d => d % 2 !== 0).length / Math.max(1, lastDigits.length)) * 100).toFixed(0)}%</span>
+                    </div>
+                  </div>
+                </div>
+                {lastDigits.length >= 50 && (
+                  <div className={`px-2 py-0.5 rounded-full font-bold uppercase tracking-tighter ${
+                    Math.abs((lastDigits.filter(d => d % 2 === 0).length / 50) * 100 - 50) > 10 
+                      ? 'bg-[#d29922]/10 text-[#d29922]' 
+                      : 'bg-[#3fb950]/10 text-[#3fb950]'
+                  }`}>
+                    {Math.abs((lastDigits.filter(d => d % 2 === 0).length / 50) * 100 - 50) > 10 ? 'Strong Trend' : 'Balanced'}
+                  </div>
+                )}
+              </div>
+
               <div className="flex-1 p-6 flex flex-col items-center justify-center gap-8">
                 <div className="flex gap-3">
                   <AnimatePresence mode="popLayout">
@@ -1017,6 +1099,56 @@ export default function App() {
                       </span>
                     </div>
                   ))
+                )}
+              </div>
+            </section>
+
+            {/* Trade History */}
+            <section className="bg-[#161b22] border border-[#30363d] rounded-2xl overflow-hidden flex flex-col h-[400px]">
+              <div className="px-5 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#1c2128]">
+                <div className="flex items-center gap-2">
+                  <List className="w-4 h-4 text-[#1f6feb]" />
+                  <h2 className="font-semibold text-sm uppercase tracking-wide">Trade History</h2>
+                </div>
+                <span className="text-[10px] text-[#8b949e] font-mono">Last 50</span>
+              </div>
+              <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+                {trades.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-[#8b949e] opacity-50 space-y-2">
+                    <History className="w-8 h-8" />
+                    <p className="text-xs">No trades yet</p>
+                  </div>
+                ) : (
+                  <table className="w-full text-left text-[11px]">
+                    <thead className="text-[#8b949e] uppercase text-[9px] border-b border-[#30363d]">
+                      <tr>
+                        <th className="px-2 py-1">Time</th>
+                        <th className="px-2 py-1">Type</th>
+                        <th className="px-2 py-1 text-right">Stake</th>
+                        <th className="px-2 py-1 text-right">Profit</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#30363d]/30">
+                      {trades.map((trade) => (
+                        <tr key={trade.id} className="hover:bg-[#30363d]/20 transition-colors">
+                          <td className="px-2 py-1.5 text-[#8b949e] font-mono">{trade.time}</td>
+                          <td className="px-2 py-1.5">
+                            <span className={`px-1.5 py-0.5 rounded-sm font-bold ${
+                              trade.type.includes('EVEN') ? 'bg-[#3fb950]/10 text-[#3fb950]' : 
+                              trade.type.includes('ODD') ? 'bg-[#f85149]/10 text-[#f85149]' : 
+                              'bg-[#1f6feb]/10 text-[#1f6feb]'
+                            }`}>
+                              {trade.type.replace('DIGIT', '')}
+                            </span>
+                          </td>
+                          <td className="px-2 py-1.5 text-right font-mono">${trade.stake.toFixed(2)}</td>
+                          <td className={`px-2 py-1.5 text-right font-bold font-mono ${trade.isWin ? 'text-[#3fb950]' : 'text-[#f85149]'}`}>
+                            {trade.isWin ? '+' : ''}{trade.profit.toFixed(2)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 )}
               </div>
             </section>
