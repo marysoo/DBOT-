@@ -385,12 +385,7 @@ export default function App() {
 
     if (!isBotRunningRef.current || isTradingRef.current) return;
 
-    // --- Trend Filter Logic ---
-    const evensCount = newDigits.filter(d => d % 2 === 0).length;
-    const oddsCount = newDigits.length - evensCount;
-    const evenPercent = (evensCount / newDigits.length) * 100;
-    const oddPercent = (oddsCount / newDigits.length) * 100;
-
+    // --- Trend Filter Logic Removed ---
     if (currentBotType === 'EVEN_ODD') {
       // Strategy: 4 consecutive same type -> counter trade
       const last4 = newDigits.slice(-4);
@@ -400,19 +395,9 @@ export default function App() {
       const allEven = last4.every(d => d % 2 === 0);
 
       if (allOdd) {
-        // We want to bet EVEN. Check if market is Odd-heavy (> 60%)
-        if (oddPercent > 60) {
-          addLog(`Trend Filter: Skipped EVEN bet (Market is ${oddPercent.toFixed(0)}% ODD)`, 'info');
-          return;
-        }
         addLog('Strategy: 4 Odds detected. Counter-trading EVEN.', 'info');
         executeTrade('DIGITEVEN');
       } else if (allEven) {
-        // We want to bet ODD. Check if market is Even-heavy (> 60%)
-        if (evenPercent > 60) {
-          addLog(`Trend Filter: Skipped ODD bet (Market is ${evenPercent.toFixed(0)}% EVEN)`, 'info');
-          return;
-        }
         addLog('Strategy: 4 Evens detected. Counter-trading ODD.', 'info');
         executeTrade('DIGITODD');
       }
@@ -988,32 +973,6 @@ export default function App() {
                     </span>
                   ))}
                 </div>
-              </div>
-              
-              {/* Trend Filter Indicator */}
-              <div className="px-5 py-2 bg-[#0d1117] border-b border-[#30363d] flex items-center justify-between text-[10px]">
-                <div className="flex items-center gap-2">
-                  <span className="text-[#8b949e] uppercase font-bold tracking-widest">Trend (50 Digits):</span>
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-1">
-                      <div className="w-1.5 h-1.5 rounded-full bg-[#3fb950]" />
-                      <span className="text-[#3fb950] font-mono">E: {((lastDigits.filter(d => d % 2 === 0).length / Math.max(1, lastDigits.length)) * 100).toFixed(0)}%</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <div className="w-1.5 h-1.5 rounded-full bg-[#f85149]" />
-                      <span className="text-[#f85149] font-mono">O: {((lastDigits.filter(d => d % 2 !== 0).length / Math.max(1, lastDigits.length)) * 100).toFixed(0)}%</span>
-                    </div>
-                  </div>
-                </div>
-                {lastDigits.length >= 50 && (
-                  <div className={`px-2 py-0.5 rounded-full font-bold uppercase tracking-tighter ${
-                    Math.abs((lastDigits.filter(d => d % 2 === 0).length / 50) * 100 - 50) > 10 
-                      ? 'bg-[#d29922]/10 text-[#d29922]' 
-                      : 'bg-[#3fb950]/10 text-[#3fb950]'
-                  }`}>
-                    {Math.abs((lastDigits.filter(d => d % 2 === 0).length / 50) * 100 - 50) > 10 ? 'Strong Trend' : 'Balanced'}
-                  </div>
-                )}
               </div>
 
               <div className="flex-1 p-6 flex flex-col items-center justify-center gap-8">
