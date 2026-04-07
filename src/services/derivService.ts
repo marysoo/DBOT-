@@ -187,20 +187,33 @@ export class DerivService {
   }
 
   private send(data: any): Promise<any> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const requestId = Math.floor(Math.random() * 1000000);
       const payload = { ...data, req_id: requestId };
       
+      const timeout = setTimeout(() => {
+        this.ws?.removeEventListener('message', listener);
+        reject(new Error(`Request timeout for ${Object.keys(data)[0]}`));
+      }, 15000);
+
       const listener = (event: MessageEvent) => {
         const response = JSON.parse(event.data);
         if (response.req_id === requestId) {
+          clearTimeout(timeout);
           this.ws?.removeEventListener('message', listener);
           resolve(response);
         }
       };
 
       this.ws?.addEventListener('message', listener);
-      this.ws?.send(JSON.stringify(payload));
+      
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(payload));
+      } else {
+        clearTimeout(timeout);
+        this.ws?.removeEventListener('message', listener);
+        reject(new Error('WebSocket is not open'));
+      }
     });
   }
 

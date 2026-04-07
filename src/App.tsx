@@ -253,6 +253,18 @@ export default function App() {
       return;
     }
 
+    // Check if TP/SL already reached from previous run
+    if (stats.totalProfit >= takeProfit) {
+      addLog('Take Profit already reached. Please reset stats to start a new session.', 'error');
+      setIsAutoTrading(false);
+      return;
+    }
+    if (stats.totalProfit <= -stopLoss) {
+      addLog('Stop Loss already reached. Please reset stats to start a new session.', 'error');
+      setIsAutoTrading(false);
+      return;
+    }
+
     // Auto-trading symbol rotation
     let symbolToUse = selectedSymbol;
     if (isAutoTrading) {
@@ -379,7 +391,7 @@ export default function App() {
     
     const lastDigit = parseInt(tick.quote.toFixed(pipSize).slice(-1));
 
-    const newDigits = [...lastDigitsRef.current, lastDigit].slice(-50);
+    const newDigits = [...lastDigitsRef.current, lastDigit].slice(-10);
     setLastDigits(newDigits);
     lastDigitsRef.current = newDigits;
 
